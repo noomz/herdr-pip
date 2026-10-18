@@ -1,6 +1,7 @@
 mod herdr;
 mod mirror;
 mod picker;
+mod scale;
 
 use crossterm::event::{self, Event, KeyCode, MouseButton, MouseEventKind};
 use crossterm::terminal;
@@ -15,8 +16,6 @@ use std::time::{Duration, Instant};
 const PAINT_TICK: Duration = Duration::from_millis(33);
 /// How often a float peek re-reads its source's size; the source can be resized beside it.
 const SOURCE_CHECK: Duration = Duration::from_secs(2);
-/// Mirror scale in percent of the source size.
-const DEFAULT_SCALE: u32 = 50;
 /// Picker size in percent of the pane surface.
 const PICKER_WIDTH: &str = "60%";
 const PICKER_HEIGHT: &str = "50%";
@@ -42,7 +41,7 @@ fn launch() -> io::Result<()> {
     };
     let snap = herdr::snapshot()?;
     let source = find_source(&snap.sources, &source_id)?;
-    let (width, height) = ratio_size(source, snap.area, DEFAULT_SCALE);
+    let (width, height) = ratio_size(source, snap.area, scale::load());
     let env = Map::from_iter([("PIP_SOURCE".to_string(), Value::from(source_id.as_str()))]);
     herdr::open_peek(Some(&source_id), json!(width), json!(height), env)
 }
@@ -77,6 +76,7 @@ fn peek() -> io::Result<()> {
     let mut screen = Screen::enter()?;
     let mut notice = None;
     let mut source_checked = Instant::now();
+    let mut scale = scale::load();
     loop {
         match &mut view {
             View::Mirror { source, observer } => {
@@ -128,6 +128,25 @@ fn peek() -> io::Result<()> {
                     Err(err) => notice = Some(err.to_string()),
                 }
             }
+            Action::Scale(change) => {
+                let View::Mirror { source, .. } = &view else { continue };
+                let changed = scale::apply(scale, change);
+                if changed == scale && change != scale::Change::Reset {
+                    continue;
+                }
+                scale = changed;
+                notice = scale::save(scale).err().map(|err| format!("scale not saved: {err}"));
+                // A popup cannot resize; the new scale applies from the next peek.
+                let Some(float_id) = &float_id else {
+                    notice = notice.or_else(|| Some(format!("{scale}% · resize needs floats")));
+                    continue;
+                };
+                let (width, height) = ratio_size(source, herdr::snapshot()?.area, scale);
+                if let Err(err) = herdr::retarget_float(float_id, Some(&source.pane_id), json!(width), json!(height)) {
+                    notice = Some(err.to_string());
+                }
+                screen.invalidate();
+            }
             Action::Pick => {
                 notice = None;
                 view = show_picker(float_id.as_deref(), own_pane.as_deref())?;
@@ -141,7 +160,7 @@ fn peek() -> io::Result<()> {
                 };
                 notice = None;
                 if let Some(float_id) = &float_id {
-                    let (width, height) = ratio_size(source, snap.area, DEFAULT_SCALE);
+                    let (width, height) = ratio_size(source, snap.area, scale);
                     let retargeted =
                         herdr::retarget_float(float_id, Some(&source.pane_id), json!(width), json!(height));
                     notice = retargeted.err().map(|err| err.to_string());
@@ -183,6 +202,8 @@ enum Action {
     Pick,
     /// Show this pane in the mirror.
     Peek(String),
+    /// Resize the mirror and remember the new scale.
+    Scale(scale::Change),
 }
 
 fn is_close_click(column: u16, row: u16) -> io::Result<bool> {
@@ -190,13 +211,17 @@ fn is_close_click(column: u16, row: u16) -> io::Result<bool> {
     Ok(row == 0 && column >= cols.saturating_sub(CLOSE_BUTTON.len() as u16))
 }
 
-/// Mirror keys: Esc/`q` close, Enter or a click on the mirror jumps, `p`/Tab picks.
+/// Mirror keys: Esc/`q` close, Enter or a click on the mirror jumps, `p`/Tab picks,
+/// `+`/`-` step the scale and `=` resets it.
 fn mirror_action(event: &Event) -> io::Result<Action> {
     Ok(match event {
         Event::Key(key) => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::Close,
             KeyCode::Enter => Action::Jump,
             KeyCode::Char('p') | KeyCode::Tab => Action::Pick,
+            KeyCode::Char('+') => Action::Scale(scale::Change::Larger),
+            KeyCode::Char('-') => Action::Scale(scale::Change::Smaller),
+            KeyCode::Char('=') => Action::Scale(scale::Change::Reset),
             _ => Action::None,
         },
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
