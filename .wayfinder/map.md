@@ -47,6 +47,8 @@ with `herdr plugin link` and smoke-tested on herdr 0.9.5.
 - [Can a popup draw the mirror with a terminal graphics protocol?](tickets/07-graphics-protocol.md): yes via kitty graphics only (herdr re-emits + clips popup images, no herdr change; Sixel/iTerm2 dropped); pixel size via `16t`/winsize (may be absent); plugin must rasterize text itself, est. 10–15 fps, text-cell fallback required. Untested live.
 - [How should a small ratio popup fit its source?](tickets/05-small-popup-fit.md): image mirror (kitty, self-rasterized, bundled font + `PIP_FONT`, 10 fps, skip unchanged) with text-mirror fallback at 90%×85%; outer `cols·s+2`×`rows·s+3`, s=50% (20–100%, `+`/`-`/`=`, remembered globally) via detached reopen helper; picker 60%×50%; source resize → letterbox.
 - [Does a kitty image render correctly inside a popup?](tickets/09-spike-image-mirror.md): yes in kitty and Ghostty 1.3.1; popups report no pixel size (`16t` silent, winsize 0) → own cell px + `c`/`r` scale; reused id flickers in Ghostty → double-buffer two ids; ~75–110 KB/frame wire, clean clip and close. Destination redrawn: popup peek + pin to non-modal split.
+- [Build: plugin skeleton, launcher and socket client](tickets/10-build-skeleton.md): the peek opens as a fork-herdr float, hidden while its source is focused; Jump keeps the float running; modal popup is the fallback on herdr without floats.
+- [Build: text mirror](tickets/11-build-text-mirror.md): observe at source size → `vt100` (one spare column) → row-diff paint; anchored to content end, not the last row; float peeks re-read source size every 2 s and restart the observer on change.
 
 ## Not yet specified
 

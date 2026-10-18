@@ -1,7 +1,7 @@
 ---
 title: Build: plugin skeleton, launcher and socket client
 type: task
-status: open
+status: closed
 assignee: noomz
 blocked_by: []
 ---
@@ -38,3 +38,13 @@ Built, not yet closed.
 **Next:** get user confirmation on the four unconfirmed checks
 (`HERDR_PLUGIN_ID=herdr-pip PIP_SOURCE=<pane> target/release/herdr-pip launch`),
 then write `## Resolution`, set `status: closed`, add Decisions-so-far line.
+
+## Resolution
+
+Verified live on 2026-10-18 in the `mac_jr` VM (Ghostty 1.3.1, fork herdr with floats), after the peek moved to floats (commit `40fdcd7`):
+
+- The launcher opens the peek as a **float** with `hide_while_focused` = source pane and never sends `focus`. A server without floats gets the modal popup instead (fallback on any float open error).
+- Ratio size works (48×38 source → 30×22 float, min-width clamp). The top row shows `ws/tab/label` and `[x]`.
+- `[x]` click, Esc and `q` each close the float and end its processes.
+- Jump (Enter, or a click on the mirror) focuses the source. In a float the peek keeps running: herdr hides it while the source is focused and shows it again on leave. In a popup, Jump still closes.
+- `float.list` reports only the explicit `visibility`; a float hidden by its rule still lists as `shown`.
