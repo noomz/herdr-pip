@@ -27,6 +27,8 @@ pub struct Source {
     pub pane_id: String,
     pub name: String,
     pub status: Option<String>,
+    /// herdr's agent state-change counter; higher is more recent, 0 for plain shells.
+    pub state_change_seq: u64,
     pub cols: u16,
     pub rows: u16,
 }
@@ -35,6 +37,7 @@ pub struct Source {
 pub struct Snapshot {
     /// Pane surface of the focused tab, the area popup sizes resolve against.
     pub area: (u16, u16),
+    pub focused_pane_id: Option<String>,
     pub sources: Vec<Source>,
 }
 
@@ -45,6 +48,12 @@ pub fn snapshot() -> io::Result<Snapshot> {
 
 pub fn focus(pane_id: &str) -> io::Result<()> {
     call("pane.focus", json!({"pane_id": pane_id})).map(drop)
+}
+
+/// Points a float peek at a new source (or none, for the picker) and resizes it.
+pub fn retarget_float(float_id: &str, hide_while_focused: Option<&str>, width: Value, height: Value) -> io::Result<()> {
+    call("float.set_hide_rule", json!({"float_id": float_id, "pane_id": hide_while_focused}))?;
+    call("float.resize", json!({"float_id": float_id, "width": width, "height": height})).map(drop)
 }
 
 /// How the peek pane opens.
@@ -137,6 +146,11 @@ fn parse_snapshot(snap: &Value) -> Option<Snapshot> {
                 .or(pane["agent"].as_str())
                 .or(pane["terminal_title_stripped"].as_str().filter(|t| !t.is_empty()))
                 .unwrap_or(pane_id);
+            let state_change_seq = snap["agents"]
+                .as_array()
+                .and_then(|agents| agents.iter().find(|agent| agent["pane_id"] == pane_id))
+                .and_then(|agent| agent["state_change_seq"].as_u64())
+                .unwrap_or(0);
             let status = pane["agent_status"]
                 .as_str()
                 .filter(|s| pane["agent"].is_string() && *s != "unknown")
@@ -150,13 +164,15 @@ fn parse_snapshot(snap: &Value) -> Option<Snapshot> {
                     pane_label
                 ),
                 status,
+                state_change_seq,
                 cols: cols.max(1),
                 rows: rows.max(1),
             })
         })
         .collect();
 
-    Some(Snapshot { area, sources })
+    let focused_pane_id = snap["focused_pane_id"].as_str().map(str::to_string);
+    Some(Snapshot { area, focused_pane_id, sources })
 }
 
 fn rect_size(rect: &Value) -> (u16, u16) {
@@ -215,6 +231,7 @@ mod tests {
                     {"pane_id": "w1:p2", "rect": {"x": 126, "y": 0, "width": 126, "height": 65}}
                 ]
             }],
+            "agents": [{"pane_id": "w1:p1", "state_change_seq": 12}],
             "panes": [
                 {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "label": null,
                  "agent": "claude", "agent_status": "working", "scroll": {"viewport_rows": 63}},
@@ -224,6 +241,7 @@ mod tests {
         });
         let parsed = parse_snapshot(&snap).unwrap();
         assert_eq!(parsed.area, (252, 65));
+        assert_eq!(parsed.focused_pane_id.as_deref(), Some("w1:p2"));
         assert_eq!(
             parsed.sources,
             vec![
@@ -231,6 +249,7 @@ mod tests {
                     pane_id: "w1:p1".into(),
                     name: "Personal/dev/claude".into(),
                     status: Some("working".into()),
+                    state_change_seq: 12,
                     cols: 124,
                     rows: 63,
                 },
@@ -238,6 +257,7 @@ mod tests {
                     pane_id: "w1:p2".into(),
                     name: "Personal/dev/logs".into(),
                     status: None,
+                    state_change_seq: 0,
                     cols: 124,
                     rows: 63,
                 },

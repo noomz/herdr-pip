@@ -1,10 +1,12 @@
 mod herdr;
 mod mirror;
+mod picker;
 
 use crossterm::event::{self, Event, KeyCode, MouseButton, MouseEventKind};
 use crossterm::terminal;
 use herdr::Source;
 use mirror::{Mirror, Observer};
+use picker::Picker;
 use serde_json::{json, Map, Value};
 use std::io::{self, Write};
 use std::sync::Mutex;
@@ -15,6 +17,9 @@ const PAINT_TICK: Duration = Duration::from_millis(33);
 const SOURCE_CHECK: Duration = Duration::from_secs(2);
 /// Mirror scale in percent of the source size.
 const DEFAULT_SCALE: u32 = 50;
+/// Picker size in percent of the pane surface.
+const PICKER_WIDTH: &str = "60%";
+const PICKER_HEIGHT: &str = "50%";
 const CLOSE_BUTTON: &str = "[x]";
 
 fn main() {
@@ -33,7 +38,7 @@ fn main() {
 /// names a pane, else at picker size. A float peek hides while its source is focused.
 fn launch() -> io::Result<()> {
     let Some(source_id) = std::env::var("PIP_SOURCE").ok().filter(|id| !id.is_empty()) else {
-        return herdr::open_peek(None, json!("60%"), json!("50%"), Map::new());
+        return herdr::open_peek(None, json!(PICKER_WIDTH), json!(PICKER_HEIGHT), Map::new());
     };
     let snap = herdr::snapshot()?;
     let source = find_source(&snap.sources, &source_id)?;
@@ -59,73 +64,212 @@ fn ratio_size(source: &Source, area: (u16, u16), scale: u32) -> (u16, u16) {
     (fit(source.cols, 2, 30, 90, area.0), fit(source.rows, 3, 8, 85, area.1))
 }
 
-/// The peek process: top row with source and `[x]`, text mirror below, read-only.
+/// The peek process: top row with source or filter and `[x]`; below it the picker or a
+/// read-only text mirror. `PIP_SOURCE` skips the picker.
 fn peek() -> io::Result<()> {
-    let mut source = match std::env::var("PIP_SOURCE") {
-        Ok(id) if !id.is_empty() => Some(find_source(&herdr::snapshot()?.sources, &id)?.clone()),
-        _ => None,
+    // A float stays open across a jump and switches between picker and mirror in place.
+    let float_id = std::env::var("HERDR_FLOAT_ID").ok();
+    let own_pane = std::env::var("HERDR_PANE_ID").ok();
+    let mut view = match std::env::var("PIP_SOURCE") {
+        Ok(id) if !id.is_empty() => View::mirror(find_source(&herdr::snapshot()?.sources, &id)?.clone())?,
+        _ => View::Picker(Picker::new(&herdr::snapshot()?, own_pane.as_deref())),
     };
-    // A float stays open across a jump: herdr hides it while the source is focused.
-    let in_float = std::env::var_os("HERDR_FLOAT_ID").is_some();
-    let mut observer = source.as_ref().map(|s| Observer::spawn(&s.pane_id, s.cols, s.rows)).transpose()?;
     let mut screen = Screen::enter()?;
     let mut notice = None;
     let mut source_checked = Instant::now();
     loop {
-        if observer.as_ref().is_some_and(|o| o.mirror.lock().unwrap().closed) {
-            observer = None;
-            notice = Some("source closed".to_string());
-        }
-        if observer.is_some() && source_checked.elapsed() >= SOURCE_CHECK {
-            source_checked = Instant::now();
-            if let Some(resized) = source.as_ref().and_then(resized_source) {
-                observer = Some(Observer::spawn(&resized.pane_id, resized.cols, resized.rows)?);
-                source = Some(resized);
-                screen.invalidate();
+        match &mut view {
+            View::Mirror { source, observer } => {
+                if observer.mirror.lock().unwrap().closed {
+                    notice = Some("source closed".to_string());
+                    view = show_picker(float_id.as_deref(), own_pane.as_deref())?;
+                    screen.invalidate();
+                    continue;
+                }
+                if source_checked.elapsed() >= SOURCE_CHECK {
+                    source_checked = Instant::now();
+                    if let Some(resized) = resized_source(source) {
+                        *observer = Observer::spawn(&resized.pane_id, resized.cols, resized.rows)?;
+                        *source = resized;
+                        screen.invalidate();
+                    }
+                }
+                screen.paint_top_row(&top_row_text(source, notice.as_deref()))?;
+                screen.paint_mirror(&observer.mirror)?;
             }
-        }
-        screen.paint_top_row(&top_row_text(source.as_ref(), notice.as_deref()))?;
-        if let Some(observer) = &observer {
-            screen.paint_mirror(&observer.mirror)?;
+            View::Picker(picker) => {
+                screen.paint_top_row(&picker_top_row_text(&picker.filter, notice.as_deref()))?;
+                let (cols, rows) = terminal::size()?;
+                let body_rows = rows.saturating_sub(1);
+                screen.paint_body(picker.lines(cols, body_rows), body_rows)?;
+            }
         }
         if !event::poll(PAINT_TICK)? {
             continue;
         }
-        let action = match event::read()? {
-            Event::Key(key) => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => Action::Close,
-                KeyCode::Enter => Action::Jump,
-                _ => Action::None,
-            },
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
-                let (cols, _) = terminal::size()?;
-                if mouse.row == 0 && mouse.column >= cols.saturating_sub(CLOSE_BUTTON.len() as u16) {
-                    Action::Close
-                } else if mouse.row > 0 {
-                    Action::Jump
-                } else {
-                    Action::None
-                }
-            }
-            Event::Resize(..) => {
-                screen.invalidate();
-                // Re-read the source size on the next tick.
-                source_checked -= SOURCE_CHECK;
-                Action::None
-            }
-            _ => Action::None,
+        let event = event::read()?;
+        if let Event::Resize(..) = event {
+            screen.invalidate();
+            // Re-read the source size on the next tick.
+            source_checked -= SOURCE_CHECK;
+        }
+        let action = match &mut view {
+            View::Mirror { .. } => mirror_action(&event)?,
+            View::Picker(picker) => picker_action(picker, &event)?,
         };
         match action {
             Action::None => {}
             Action::Close => return Ok(()),
-            Action::Jump => match source.as_ref().map(|s| herdr::focus(&s.pane_id)) {
-                Some(Ok(())) if !in_float => return Ok(()),
-                Some(Ok(())) => notice = None,
-                Some(Err(err)) => notice = Some(err.to_string()),
-                None => {}
-            },
+            Action::Jump => {
+                let View::Mirror { source, .. } = &view else { continue };
+                match herdr::focus(&source.pane_id) {
+                    Ok(()) if float_id.is_none() => return Ok(()),
+                    Ok(()) => notice = None,
+                    Err(err) => notice = Some(err.to_string()),
+                }
+            }
+            Action::Pick => {
+                notice = None;
+                view = show_picker(float_id.as_deref(), own_pane.as_deref())?;
+                screen.invalidate();
+            }
+            Action::Peek(pane_id) => {
+                let snap = herdr::snapshot()?;
+                let Ok(source) = find_source(&snap.sources, &pane_id) else {
+                    notice = Some("pane closed".to_string());
+                    continue;
+                };
+                notice = None;
+                if let Some(float_id) = &float_id {
+                    let (width, height) = ratio_size(source, snap.area, DEFAULT_SCALE);
+                    let retargeted =
+                        herdr::retarget_float(float_id, Some(&source.pane_id), json!(width), json!(height));
+                    notice = retargeted.err().map(|err| err.to_string());
+                }
+                view = View::mirror(source.clone())?;
+                source_checked = Instant::now();
+                screen.invalidate();
+            }
         }
     }
+}
+
+/// What the peek shows below its top row.
+enum View {
+    Picker(Picker),
+    Mirror { source: Source, observer: Observer },
+}
+
+impl View {
+    fn mirror(source: Source) -> io::Result<Self> {
+        let observer = Observer::spawn(&source.pane_id, source.cols, source.rows)?;
+        Ok(View::Mirror { source, observer })
+    }
+}
+
+/// A fresh picker; a float also drops its hide rule and returns to picker size.
+fn show_picker(float_id: Option<&str>, own_pane: Option<&str>) -> io::Result<View> {
+    if let Some(float_id) = float_id {
+        herdr::retarget_float(float_id, None, json!(PICKER_WIDTH), json!(PICKER_HEIGHT))?;
+    }
+    Ok(View::Picker(Picker::new(&herdr::snapshot()?, own_pane)))
+}
+
+enum Action {
+    None,
+    Close,
+    Jump,
+    /// Back to the picker.
+    Pick,
+    /// Show this pane in the mirror.
+    Peek(String),
+}
+
+fn is_close_click(column: u16, row: u16) -> io::Result<bool> {
+    let (cols, _) = terminal::size()?;
+    Ok(row == 0 && column >= cols.saturating_sub(CLOSE_BUTTON.len() as u16))
+}
+
+/// Mirror keys: Esc/`q` close, Enter or a click on the mirror jumps, `p`/Tab picks.
+fn mirror_action(event: &Event) -> io::Result<Action> {
+    Ok(match event {
+        Event::Key(key) => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::Close,
+            KeyCode::Enter => Action::Jump,
+            KeyCode::Char('p') | KeyCode::Tab => Action::Pick,
+            _ => Action::None,
+        },
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+            if is_close_click(mouse.column, mouse.row)? {
+                Action::Close
+            } else if mouse.row > 0 {
+                Action::Jump
+            } else {
+                Action::None
+            }
+        }
+        _ => Action::None,
+    })
+}
+
+/// Picker keys: typing filters; with an empty filter `j`/`k` move and `q` closes.
+/// Esc clears the filter, then closes. Enter or a click on a row peeks; the wheel moves.
+fn picker_action(picker: &mut Picker, event: &Event) -> io::Result<Action> {
+    let peek = |source: Option<&Source>| source.map_or(Action::None, |s| Action::Peek(s.pane_id.clone()));
+    Ok(match event {
+        Event::Key(key) => match key.code {
+            KeyCode::Esc if !picker.filter.is_empty() => {
+                picker.set_filter(String::new());
+                Action::None
+            }
+            KeyCode::Esc => Action::Close,
+            KeyCode::Char('q') if picker.filter.is_empty() => Action::Close,
+            KeyCode::Char('j') if picker.filter.is_empty() => {
+                picker.move_by(1);
+                Action::None
+            }
+            KeyCode::Char('k') if picker.filter.is_empty() => {
+                picker.move_by(-1);
+                Action::None
+            }
+            KeyCode::Down => {
+                picker.move_by(1);
+                Action::None
+            }
+            KeyCode::Up => {
+                picker.move_by(-1);
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                picker.set_filter(format!("{}{c}", picker.filter));
+                Action::None
+            }
+            KeyCode::Backspace => {
+                let mut filter = picker.filter.clone();
+                filter.pop();
+                picker.set_filter(filter);
+                Action::None
+            }
+            KeyCode::Enter => peek(picker.selected()),
+            _ => Action::None,
+        },
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if is_close_click(mouse.column, mouse.row)? => Action::Close,
+            MouseEventKind::Down(MouseButton::Left) if mouse.row > 0 => {
+                peek(picker.at_row(usize::from(mouse.row - 1)))
+            }
+            MouseEventKind::ScrollDown => {
+                picker.move_by(1);
+                Action::None
+            }
+            MouseEventKind::ScrollUp => {
+                picker.move_by(-1);
+                Action::None
+            }
+            _ => Action::None,
+        },
+        _ => Action::None,
+    })
 }
 
 /// The source with its current size, when that differs from `source`'s.
@@ -135,29 +279,32 @@ fn resized_source(source: &Source) -> Option<Source> {
     ((current.cols, current.rows) != (source.cols, source.rows)).then(|| current.clone())
 }
 
-enum Action {
-    None,
-    Close,
-    Jump,
-}
-
-fn top_row_text(source: Option<&Source>, notice: Option<&str>) -> String {
-    let mut text = source.map_or_else(|| "no source".to_string(), |s| s.name.clone());
-    if let Some(status) = source.and_then(|s| s.status.as_deref()) {
+fn top_row_text(source: &Source, notice: Option<&str>) -> String {
+    let mut text = source.name.clone();
+    if let Some(status) = source.status.as_deref() {
         text = format!("{text} · {status}");
     }
-    if let Some(notice) = notice {
-        text = format!("{text} · {notice}");
+    with_notice(text, notice)
+}
+
+fn picker_top_row_text(filter: &str, notice: Option<&str>) -> String {
+    let text = if filter.is_empty() { "pick a pane, type to filter".to_string() } else { format!("filter: {filter}") };
+    with_notice(text, notice)
+}
+
+fn with_notice(text: String, notice: Option<&str>) -> String {
+    match notice {
+        Some(notice) => format!("{text} · {notice}"),
+        None => text,
     }
-    text
 }
 
 /// Raw-mode alternate screen with SGR mouse reporting, restored on drop.
 struct Screen {
     out: io::Stdout,
     drawn_top_row: Option<String>,
-    /// Mirror rows as last drawn from screen row 2 down; `None` forces a full repaint.
-    drawn_mirror: Option<Vec<Vec<u8>>>,
+    /// Body rows as last drawn from screen row 2 down; `None` forces a full repaint.
+    drawn_body: Option<Vec<Vec<u8>>>,
 }
 
 impl Screen {
@@ -166,36 +313,45 @@ impl Screen {
         let mut out = io::stdout();
         out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J")?;
         out.flush()?;
-        Ok(Screen { out, drawn_top_row: None, drawn_mirror: None })
+        Ok(Screen { out, drawn_top_row: None, drawn_body: None })
     }
 
     fn invalidate(&mut self) {
         self.drawn_top_row = None;
-        self.drawn_mirror = None;
+        self.drawn_body = None;
     }
 
-    /// Repaints the mirror rows that changed since the last paint, in one synchronized update.
+    /// Repaints the mirror when a frame arrived since the last paint.
     fn paint_mirror(&mut self, mirror: &Mutex<Mirror>) -> io::Result<()> {
         let mut mirror = mirror.lock().unwrap();
-        if !mirror.dirty && self.drawn_mirror.is_some() {
+        if !mirror.dirty && self.drawn_body.is_some() {
             return Ok(());
         }
         mirror.dirty = false;
         let (cols, rows) = terminal::size()?;
-        let mut lines = mirror.visible_rows(cols, rows.saturating_sub(1));
+        let body_rows = rows.saturating_sub(1);
+        let lines = mirror.visible_rows(cols, body_rows);
         drop(mirror);
-        lines.resize(usize::from(rows.saturating_sub(1)), Vec::new());
-        let drawn = self.drawn_mirror.take().unwrap_or_default();
-        let mut buf = b"\x1b[?2026h".to_vec();
-        for (i, line) in lines.iter().enumerate().filter(|(i, line)| drawn.get(*i) != Some(line)) {
-            write!(buf, "\x1b[{};1H\x1b[0m\x1b[2K", i + 2)?;
-            buf.extend_from_slice(line);
-            buf.extend_from_slice(b"\x1b[0m");
+        self.paint_body(lines, body_rows)
+    }
+
+    /// Repaints the body rows that changed since the last paint, in one synchronized update.
+    fn paint_body(&mut self, mut lines: Vec<Vec<u8>>, rows: u16) -> io::Result<()> {
+        lines.resize(usize::from(rows), Vec::new());
+        let drawn = self.drawn_body.take().unwrap_or_default();
+        let mut changed = lines.iter().enumerate().filter(|(i, line)| drawn.get(*i) != Some(line)).peekable();
+        if changed.peek().is_some() {
+            let mut buf = b"\x1b[?2026h".to_vec();
+            for (i, line) in changed {
+                write!(buf, "\x1b[{};1H\x1b[0m\x1b[2K", i + 2)?;
+                buf.extend_from_slice(line);
+                buf.extend_from_slice(b"\x1b[0m");
+            }
+            buf.extend_from_slice(b"\x1b[?2026l");
+            self.out.write_all(&buf)?;
+            self.out.flush()?;
         }
-        buf.extend_from_slice(b"\x1b[?2026l");
-        self.out.write_all(&buf)?;
-        self.out.flush()?;
-        self.drawn_mirror = Some(lines);
+        self.drawn_body = Some(lines);
         Ok(())
     }
 
@@ -238,7 +394,7 @@ mod tests {
     use super::*;
 
     fn source(cols: u16, rows: u16) -> Source {
-        Source { pane_id: "w1:p1".into(), name: "ws/tab/pane".into(), status: None, cols, rows }
+        Source { pane_id: "w1:p1".into(), name: "ws/tab/pane".into(), status: None, state_change_seq: 0, cols, rows }
     }
 
     #[test]
