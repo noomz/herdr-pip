@@ -1,0 +1,14 @@
+id = "pipspike"
+name = "PiP reopen spike"
+version = "0.0.1"
+min_herdr_version = "0.9.0"
+description = "Throwaway: popup self-resize via detached reopen helper"
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "pop"
+title = "pipspike"
+placement = "popup"
+width = 40
+height = 10
+command = ["sh", "popup.sh"]

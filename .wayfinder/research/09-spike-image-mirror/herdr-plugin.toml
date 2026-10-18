@@ -1,0 +1,14 @@
+id = "pipimg"
+name = "PiP image spike"
+version = "0.0.1"
+min_herdr_version = "0.9.0"
+description = "Throwaway: kitty graphics image inside a popup"
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "pop"
+title = "pipimg"
+placement = "popup"
+width = 100
+height = 30
+command = ["python3", "-I", "popup.py"]

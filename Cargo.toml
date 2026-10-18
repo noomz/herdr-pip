@@ -1,0 +1,16 @@
+[package]
+name = "herdr-pip"
+version = "0.1.0"
+edition = "2021"
+description = "Picture-in-picture pane peek for herdr"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.29"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

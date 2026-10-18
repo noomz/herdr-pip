@@ -1,0 +1,40 @@
+# 07 - Pixel mirror via terminal graphics protocol (herdr 0.9.5-ish)
+
+Paths relative to ~/Projects/Opensources/herdr (checkout slightly past 0.9.5). Read-only study; the cost numbers in Q4 are estimates, not measurements.
+
+## Verdict
+Feasible in plugin v1 with no herdr change, for kitty and ghostty, via the **Kitty graphics protocol only**. Sixel and iTerm2 OSC 1337 are not supported. Herdr already parses kitty graphics from pane output (popup panes included), clips and places them itself, and exposes pixel geometry to the child. Unverified: a live end-to-end test in kitty/ghostty inside a popup. Build a spike first.
+
+## 1. What the pane emulator does with graphics
+- Emulator is **libghostty-vt** (Zig, vendored `vendor/libghostty-vt`, Rust wrapper `crates/ghostty-vt/src/lib.rs`; `Cargo.toml:24-28`). Not vte/vt100.
+- **Kitty graphics (APC `ESC _G`): parsed and rendered by herdr.** `crates/ghostty-vt/src/lib.rs:1075-1115` enables storage limit (64 MiB, line 205), `MEDIUM_FILE`, `MEDIUM_TEMP_FILE`, `MEDIUM_SHARED_MEM`, APC max bytes 16 MiB (206-207). Herdr re-emits to the host terminal itself (`src/kitty_graphics.rs`: upload `a=t,t=d` at :453, placement `a=p ... z= C=1` at :467, delete `a=d` at :441/447). Chunk size 3072 bytes (:16).
+- **Popup panes are covered.** `src/kitty_graphics/surface.rs:55,72,601-609` has a `Popup` visibility and `SurfaceGraphicsTarget::Popup`; the popup's images use the popup inner origin (:936-945). Test: `src/client/shell/tests/graphics.rs:499` `popup_terminal_keeps_own_graphics_and_hides_only_background_overlap`.
+- Docs (`docs/next/website/src/content/docs/configuration.mdx:539-562`): "Applications and plugins integrate through the standard Kitty graphics protocol emitted in pane terminal output. Herdr renders these images by default in compatible outer terminals." Same wording in `socket-api.mdx:179-188` (the socket pane-overlay API `pane.graphics.*` was removed; no replacement). Setting `terminal.kitty_graphics = false` disables it; in remote sessions the server setting controls parsing and the client setting controls output.
+- **Sixel: not implemented.** The only hit in vendored source is the DA1 enum value `sixel = 4` (`vendor/libghostty-vt/src/terminal/device_attributes.zig:53`); no decoder. Herdr src has no sixel code. DCS is consumed by the parser and dropped.
+- **iTerm2 OSC 1337: not rendered.** Herdr only reads `1337;CurrentDir=` (`src/pane/terminal.rs:4158`). `File=` inline images are dropped.
+- **tmux-style DCS passthrough (`ESC P tmux;`): none found.** No passthrough code anywhere in `src`. Do not rely on it.
+
+## 2. Pixel size discovery inside a pane
+- `TIOCSWINSZ` sets `ws_xpixel = cols*cell_w`, `ws_ypixel = rows*cell_h` (clamped to u16) (`src/pty/fd.rs:220-237`). So `TIOCGWINSZ` in the popup gives pixels when herdr knows the host cell size. Caveat: a pixel size over 65535 saturates.
+- `CSI 14t` / `16t` / `18t` are answered from the pane's size (`src/pane/terminal.rs:6105-6130` test: `\e[4;432;720t`, `\e[6;18;9t`, `\e[8;24;80t`; callback at `crates/ghostty-vt/src/lib.rs:538-555`). **Silent if cell size is unknown** (0 width or height), test `:6150`. Handle a missing reply by falling back to a default or by a config value.
+- Herdr learns host cell size from ioctl, else by sending `CSI 16t` to the outer terminal (`src/client/terminal_geometry.rs:237-250`; skipped on Windows). Kitty and ghostty both answer 16t. The popup's cell size follows the host and updates on resize/font change via `runtime.resize(rows, cols, cell_w, cell_h)` (`src/server/headless.rs:1837,2206`).
+- Kitty-graphics queries (`a=q`) are answered by libghostty-vt as a kitty-capable terminal, so plugin-side detection with `\e_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\e\\` should work (unverified here).
+
+## 3. Interaction with herdr redraws
+- Herdr, not the app, owns placement: "Herdr keeps image placement, clipping, and visibility under its control" (configuration.mdx:547). Placements are `C=1` (no cursor move), positioned by explicit cursor addressing, and given explicit `c`/`r` cell extents (kitty_graphics.rs:467), so the image scales to the popup's cells regardless of font.
+- Popup over panes: "Popups, menus, and notifications crop images around the area they cover... the covered part returns when the overlay closes. Images do not dim with dialog backgrounds." (configuration.mdx:543). The popup's own images are clipped to its inner rect; background-pane images are cropped around the popup (surface.rs:121-125 popup occlusion; test surface.rs:1853).
+- On close: placements/images are deleted via `a=d` (kitty_graphics.rs:441-447); herdr tracks delivered state so stale images are not expected. Verify manually: open, resize, scroll the popup, close.
+- Use one fixed image id and re-transmit each frame (replace) rather than a new id each frame, to stay under the 64 MiB per-terminal storage limit and avoid churn. Avoid the animation (`a=f`) path: docs note animation is a slower route (configuration.mdx:549).
+
+## 4. Cost of rasterizing the cell grid ourselves (estimates)
+Grid 200x50 at 9x18 px cells = 1800x900 px = 1.62 Mpx = 6.5 MB RGBA/frame.
+- Raster: ~10k cells, blit from a glyph atlas (fontdue / ab_glyph, cache per (char, style)); bg fill + alpha-blend 1.6 Mpx. Estimated 2-6 ms/frame single-threaded; only dirty cells need redraw. Font loading: pick the user's font file (config) or bundle one; no way to read the host terminal's font. Fidelity gaps: ligatures, emoji, wide/combining glyphs, bold/italic faces, nerd-font symbols, cursor, font fallback. This is the real cost, not CPU.
+- Encode/bandwidth at 30 fps: raw RGBA 6.5 MB x 30 = ~195 MB/s (too much inline; base64 adds 33%). PNG (f=100, fast compression, flat colour compresses well) ~100-400 KB/frame but encode is ~10-30 ms at this size, which breaks 30 fps; use zlib-compressed RGBA (`o=z`, f=32) or lower px (render at 1 px/char-scale then let c/r upscale) to cut it. Rendering at half resolution (4.5x9 px/cell) quarters the cost, but text blurs. A realistic target is 10-15 fps with dirty-frame skipping.
+- Bandwidth hops: plugin -> herdr pane (PTY, 16 MiB APC cap per message) -> herdr -> host. Herdr re-encodes: inline base64 chunks to the host, **except** local Unix Ghostty clients where it uses file transmission after a probe (configuration.mdx:545-549; `encode_kitty_regular_file` kitty_graphics.rs:432-437, `t=f`). Kitty host gets inline base64 for the last hop. So shared-memory/file saves only the plugin->herdr hop (plugin may use `t=f`/`t=t`/`t=s`; herdr enables all three, lib.rs:1077-1106; docs say herdr snapshots RGBA files up to 16 MiB each / 64 MiB total, shared memory goes via "the normal loader").
+- Kitty spec itself supports `t=f` (file), `t=t` (temp file, deleted after read), `t=s` (POSIX shm): https://sw.kovidgoyal.net/kitty/graphics-protocol/ (transmission medium). Ghostty implements the same protocol: https://ghostty.org/docs/features (graphics/kitty). Local-only; useless over SSH.
+
+## 5. Bottom line
+- v1 can ship a **graphics mode** behind a capability check (a=q reply or CSI 16t reply, plus env `TERM_PROGRAM`/`KITTY_WINDOW_ID`): rasterize observer grid -> RGBA -> kitty APC with explicit `c`/`r` -> scales to popup, font independent. Keep the text-cell paint as the default/fallback (works in tmux, WezTerm w/o kitty, SSH, Sixel-only terminals).
+- Simpler pixel route worth testing first: when the source pane itself draws images (kitty), nothing is gained; this only helps if we want crisp scaling of text. Weigh against fidelity loss from rasterizing text ourselves.
+- No herdr change needed. If gaps appear: (a) pane-image transport for plugin popups uses inline PTY APC only (acceptable); (b) a herdr-side "mirror pane as image" would need a new API (the socket graphics API was removed) - not minimal, not needed.
+- Risks to test: popup resize debounce vs. image re-transmit, cell size 0 (no reply) fallback, Windows hosts (cell size query skipped), `kitty_graphics=false` configs, ghostty file path only for local clients.

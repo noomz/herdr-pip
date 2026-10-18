@@ -1,0 +1,17 @@
+id = "herdr-pip"
+name = "PiP"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Peek at another pane's live output in a popup"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "peek"
+title = "Peek at a pane"
+command = ["target/release/herdr-pip", "launch"]
+
+[[panes]]
+id = "peek"
+title = "PiP"
+placement = "popup"
+command = ["target/release/herdr-pip", "peek"]
