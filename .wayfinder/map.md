@@ -50,6 +50,7 @@ with `herdr plugin link` and smoke-tested on herdr 0.9.5.
 - [Build: plugin skeleton, launcher and socket client](tickets/10-build-skeleton.md): the peek opens as a fork-herdr float, hidden while its source is focused; Jump keeps the float running; modal popup is the fallback on herdr without floats.
 - [Build: text mirror](tickets/11-build-text-mirror.md): observe at source size → `vt100` (one spare column) → row-diff paint; anchored to content end, not the last row; float peeks re-read source size every 2 s and restart the observer on change.
 - [Build: picker](tickets/12-build-picker.md): attention-first list (blocked, done, working, idle, shell; then newest state change), focused and own pane excluded; type-to-filter, `j`/`k`/`q` only on an empty filter, Esc clears then closes; a float switches picker ↔ mirror in place via `float.set_hide_rule` + `float.resize` (no reopen); source closed → picker with notice.
+- [Build: reopen helper, resize keys and remembered scale](tickets/13-build-resize.md): float-only, no reopen helper; `+`/`-` step a global scale by 10 in 20–100, `=` resets to 50 and refits; float resizes in place; popup fallback saves the scale for the next peek and says `resize needs floats`; scale in `$XDG_STATE_HOME/herdr-pip/scale`, applied to the text mirror too.
 
 ## Not yet specified
 
