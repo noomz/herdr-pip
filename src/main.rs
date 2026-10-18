@@ -72,9 +72,9 @@ fn peek() -> io::Result<()> {
     let mut notice = None;
     let mut source_checked = Instant::now();
     loop {
-        if let Some(reason) = observer.as_ref().and_then(|o| o.mirror.lock().unwrap().closed.clone()) {
+        if observer.as_ref().is_some_and(|o| o.mirror.lock().unwrap().closed) {
             observer = None;
-            notice = Some(reason);
+            notice = Some("source closed".to_string());
         }
         if observer.is_some() && source_checked.elapsed() >= SOURCE_CHECK {
             source_checked = Instant::now();

@@ -11,15 +11,15 @@ pub struct Mirror {
     parser: vt100::Parser,
     /// Set by every applied frame, cleared by the painter.
     pub dirty: bool,
-    /// Set once the stream ends, with herdr's reason when it sent one.
-    pub closed: Option<String>,
+    /// Set once the stream ends.
+    pub closed: bool,
 }
 
 impl Mirror {
     fn new(cols: u16, rows: u16) -> Self {
         // One spare column: with a request narrower than the grid, vt100 never joins
         // wrapped rows, so each row's bytes move the cursor only within that row.
-        Mirror { parser: vt100::Parser::new(rows, cols + 1, 0), dirty: false, closed: None }
+        Mirror { parser: vt100::Parser::new(rows, cols + 1, 0), dirty: false, closed: false }
     }
 
     /// Applies one NDJSON record from the observe stream.
@@ -35,23 +35,27 @@ impl Mirror {
                     self.dirty = true;
                 }
             }
-            Some("terminal.closed") => {
-                self.closed = Some(record["reason"].as_str().unwrap_or("source closed").to_string());
-            }
+            Some("terminal.closed") => self.closed = true,
             _ => {}
         }
     }
 
-    /// The source's bottom `rows` rows and left `cols` columns, each as self-contained
+    /// The left `cols` columns of the last `rows` rows that end at the source's content
+    /// (its last non-blank row or the cursor row, whichever is lower), so a short output
+    /// still shows instead of the blank rows below it. Each row is self-contained
     /// formatted bytes that start from default attributes at the row's first column.
     pub fn visible_rows(&self, cols: u16, rows: u16) -> Vec<Vec<u8>> {
         let screen = self.parser.screen();
-        let (source_rows, grid_cols) = screen.size();
+        let grid_cols = screen.size().1;
         let width = cols.min(grid_cols - 1);
-        screen
-            .rows_formatted(0, width)
-            .skip(usize::from(source_rows.saturating_sub(rows)))
-            .collect()
+        let last_text = screen
+            .rows(0, grid_cols)
+            .enumerate()
+            .filter(|(_, row)| !row.trim().is_empty())
+            .last()
+            .map_or(0, |(i, _)| i);
+        let end = last_text.max(usize::from(screen.cursor_position().0)) + 1;
+        screen.rows_formatted(0, width).take(end).skip(end.saturating_sub(usize::from(rows))).collect()
     }
 }
 
@@ -82,11 +86,11 @@ impl Observer {
                 let Ok(line) = line else { break };
                 let mut mirror = shared.lock().unwrap();
                 mirror.apply(&line);
-                if mirror.closed.is_some() {
+                if mirror.closed {
                     return;
                 }
             }
-            shared.lock().unwrap().closed.get_or_insert_with(|| "source closed".to_string());
+            shared.lock().unwrap().closed = true;
         });
         Ok(Observer { child, mirror })
     }
@@ -140,12 +144,24 @@ mod tests {
     }
 
     #[test]
-    fn closed_record_keeps_reason() {
+    fn anchors_to_content_end_not_blank_rows_below_it() {
+        let mut mirror = Mirror::new(6, 6);
+        mirror.apply(&frame("\x1b[1;1Ha\x1b[2;1Hb\x1b[3;1H$ "));
+        assert_eq!(text(&mirror.visible_rows(6, 2)), ["b", "$ "]);
+    }
+
+    #[test]
+    fn anchor_includes_cursor_row_below_text() {
+        let mut mirror = Mirror::new(6, 6);
+        mirror.apply(&frame("\x1b[1;1Ha\x1b[2;1Hb\x1b[4;1H"));
+        assert_eq!(text(&mirror.visible_rows(6, 2)), ["", ""]);
+        assert_eq!(text(&mirror.visible_rows(6, 3)), ["b", "", ""]);
+    }
+
+    #[test]
+    fn closed_record_ends_the_mirror() {
         let mut mirror = Mirror::new(6, 2);
         mirror.apply(r#"{"type":"terminal.closed","reason":"detached"}"#);
-        assert_eq!(mirror.closed.as_deref(), Some("detached"));
-        mirror.closed = None;
-        mirror.apply(r#"{"type":"terminal.closed","reason":null}"#);
-        assert_eq!(mirror.closed.as_deref(), Some("source closed"));
+        assert!(mirror.closed);
     }
 }
