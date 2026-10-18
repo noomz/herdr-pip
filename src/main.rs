@@ -1,13 +1,18 @@
 mod herdr;
+mod mirror;
 
 use crossterm::event::{self, Event, KeyCode, MouseButton, MouseEventKind};
 use crossterm::terminal;
 use herdr::Source;
+use mirror::{Mirror, Observer};
 use serde_json::{json, Map, Value};
 use std::io::{self, Write};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const PAINT_TICK: Duration = Duration::from_millis(33);
+/// How often a float peek re-reads its source's size; the source can be resized beside it.
+const SOURCE_CHECK: Duration = Duration::from_secs(2);
 /// Mirror scale in percent of the source size.
 const DEFAULT_SCALE: u32 = 50;
 const CLOSE_BUTTON: &str = "[x]";
@@ -54,18 +59,35 @@ fn ratio_size(source: &Source, area: (u16, u16), scale: u32) -> (u16, u16) {
     (fit(source.cols, 2, 30, 90, area.0), fit(source.rows, 3, 8, 85, area.1))
 }
 
-/// The popup process: top row with source and `[x]`, read-only otherwise.
+/// The peek process: top row with source and `[x]`, text mirror below, read-only.
 fn peek() -> io::Result<()> {
-    let source = match std::env::var("PIP_SOURCE") {
+    let mut source = match std::env::var("PIP_SOURCE") {
         Ok(id) if !id.is_empty() => Some(find_source(&herdr::snapshot()?.sources, &id)?.clone()),
         _ => None,
     };
     // A float stays open across a jump: herdr hides it while the source is focused.
     let in_float = std::env::var_os("HERDR_FLOAT_ID").is_some();
+    let mut observer = source.as_ref().map(|s| Observer::spawn(&s.pane_id, s.cols, s.rows)).transpose()?;
     let mut screen = Screen::enter()?;
     let mut notice = None;
+    let mut source_checked = Instant::now();
     loop {
+        if let Some(reason) = observer.as_ref().and_then(|o| o.mirror.lock().unwrap().closed.clone()) {
+            observer = None;
+            notice = Some(reason);
+        }
+        if observer.is_some() && source_checked.elapsed() >= SOURCE_CHECK {
+            source_checked = Instant::now();
+            if let Some(resized) = source.as_ref().and_then(resized_source) {
+                observer = Some(Observer::spawn(&resized.pane_id, resized.cols, resized.rows)?);
+                source = Some(resized);
+                screen.invalidate();
+            }
+        }
         screen.paint_top_row(&top_row_text(source.as_ref(), notice.as_deref()))?;
+        if let Some(observer) = &observer {
+            screen.paint_mirror(&observer.mirror)?;
+        }
         if !event::poll(PAINT_TICK)? {
             continue;
         }
@@ -87,6 +109,8 @@ fn peek() -> io::Result<()> {
             }
             Event::Resize(..) => {
                 screen.invalidate();
+                // Re-read the source size on the next tick.
+                source_checked -= SOURCE_CHECK;
                 Action::None
             }
             _ => Action::None,
@@ -102,6 +126,13 @@ fn peek() -> io::Result<()> {
             },
         }
     }
+}
+
+/// The source with its current size, when that differs from `source`'s.
+fn resized_source(source: &Source) -> Option<Source> {
+    let snap = herdr::snapshot().ok()?;
+    let current = find_source(&snap.sources, &source.pane_id).ok()?;
+    ((current.cols, current.rows) != (source.cols, source.rows)).then(|| current.clone())
 }
 
 enum Action {
@@ -125,6 +156,8 @@ fn top_row_text(source: Option<&Source>, notice: Option<&str>) -> String {
 struct Screen {
     out: io::Stdout,
     drawn_top_row: Option<String>,
+    /// Mirror rows as last drawn from screen row 2 down; `None` forces a full repaint.
+    drawn_mirror: Option<Vec<Vec<u8>>>,
 }
 
 impl Screen {
@@ -133,11 +166,37 @@ impl Screen {
         let mut out = io::stdout();
         out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J")?;
         out.flush()?;
-        Ok(Screen { out, drawn_top_row: None })
+        Ok(Screen { out, drawn_top_row: None, drawn_mirror: None })
     }
 
     fn invalidate(&mut self) {
         self.drawn_top_row = None;
+        self.drawn_mirror = None;
+    }
+
+    /// Repaints the mirror rows that changed since the last paint, in one synchronized update.
+    fn paint_mirror(&mut self, mirror: &Mutex<Mirror>) -> io::Result<()> {
+        let mut mirror = mirror.lock().unwrap();
+        if !mirror.dirty && self.drawn_mirror.is_some() {
+            return Ok(());
+        }
+        mirror.dirty = false;
+        let (cols, rows) = terminal::size()?;
+        let mut lines = mirror.visible_rows(cols, rows.saturating_sub(1));
+        drop(mirror);
+        lines.resize(usize::from(rows.saturating_sub(1)), Vec::new());
+        let drawn = self.drawn_mirror.take().unwrap_or_default();
+        let mut buf = b"\x1b[?2026h".to_vec();
+        for (i, line) in lines.iter().enumerate().filter(|(i, line)| drawn.get(*i) != Some(line)) {
+            write!(buf, "\x1b[{};1H\x1b[0m\x1b[2K", i + 2)?;
+            buf.extend_from_slice(line);
+            buf.extend_from_slice(b"\x1b[0m");
+        }
+        buf.extend_from_slice(b"\x1b[?2026l");
+        self.out.write_all(&buf)?;
+        self.out.flush()?;
+        self.drawn_mirror = Some(lines);
+        Ok(())
     }
 
     /// Dim source text on the left, `[x]` on the right; redrawn only when it changes.
