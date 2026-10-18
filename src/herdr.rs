@@ -47,22 +47,55 @@ pub fn focus(pane_id: &str) -> io::Result<()> {
     call("pane.focus", json!({"pane_id": pane_id})).map(drop)
 }
 
+/// How the peek pane opens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Placement<'a> {
+    /// Session-modal popup, available on every herdr.
+    Popup,
+    /// Non-modal float (fork herdr), hidden while `hide_while_focused` is the focused pane.
+    Float { hide_while_focused: Option<&'a str> },
+}
+
+/// Opens the peek as a float, or as a popup when the server rejects floats.
 /// `width`/`height` are outer cells (a number) or a percent of the pane surface ("60%").
-pub fn open_popup(width: Value, height: Value, env: Map<String, Value>) -> io::Result<()> {
+pub fn open_peek(
+    hide_while_focused: Option<&str>,
+    width: Value,
+    height: Value,
+    env: Map<String, Value>,
+) -> io::Result<()> {
     let plugin_id = std::env::var("HERDR_PLUGIN_ID")
         .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "HERDR_PLUGIN_ID not set"))?;
-    call(
-        "plugin.pane.open",
-        json!({
-            "plugin_id": plugin_id,
-            "entrypoint": "peek",
-            "placement": "popup",
-            "width": width,
-            "height": height,
-            "env": env,
-        }),
-    )
-    .map(drop)
+    let open = |placement| {
+        let params = open_params(&plugin_id, placement, width.clone(), height.clone(), env.clone());
+        call("plugin.pane.open", params).map(drop)
+    };
+    open(Placement::Float { hide_while_focused }).or_else(|_| open(Placement::Popup))
+}
+
+fn open_params(
+    plugin_id: &str,
+    placement: Placement,
+    width: Value,
+    height: Value,
+    env: Map<String, Value>,
+) -> Value {
+    let mut params = json!({
+        "plugin_id": plugin_id,
+        "entrypoint": "peek",
+        "placement": "popup",
+        "width": width,
+        "height": height,
+        "env": env,
+    });
+    if let Placement::Float { hide_while_focused } = placement {
+        // A float must not send `focus: true`; herdr rejects it with invalid_params.
+        params["placement"] = json!("float");
+        if let Some(pane_id) = hide_while_focused {
+            params["hide_while_focused"] = json!(pane_id);
+        }
+    }
+    params
 }
 
 fn parse_snapshot(snap: &Value) -> Option<Snapshot> {
@@ -134,6 +167,38 @@ fn rect_size(rect: &Value) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_params_hide_while_source_focused_and_never_send_focus() {
+        let env = Map::from_iter([("PIP_SOURCE".to_string(), json!("w1:p1"))]);
+        let params = open_params(
+            "herdr-pip",
+            Placement::Float { hide_while_focused: Some("w1:p1") },
+            json!(64),
+            json!(34),
+            env,
+        );
+        assert_eq!(params["placement"], "float");
+        assert_eq!(params["hide_while_focused"], "w1:p1");
+        assert_eq!(params["env"]["PIP_SOURCE"], "w1:p1");
+        assert!(params.get("focus").is_none());
+
+        let picker = open_params(
+            "herdr-pip",
+            Placement::Float { hide_while_focused: None },
+            json!("60%"),
+            json!("50%"),
+            Map::new(),
+        );
+        assert!(picker.get("hide_while_focused").is_none());
+    }
+
+    #[test]
+    fn popup_params_carry_no_float_fields() {
+        let params = open_params("herdr-pip", Placement::Popup, json!(64), json!(34), Map::new());
+        assert_eq!(params["placement"], "popup");
+        assert!(params.get("hide_while_focused").is_none());
+    }
 
     #[test]
     fn parses_sources_with_names_sizes_and_agent_status() {

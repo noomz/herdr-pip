@@ -24,17 +24,17 @@ fn main() {
     }
 }
 
-/// Plugin action: open the peek popup, at the source's ratio size when `PIP_SOURCE`
-/// names a pane, else at picker size.
+/// Plugin action: open the peek, at the source's ratio size when `PIP_SOURCE`
+/// names a pane, else at picker size. A float peek hides while its source is focused.
 fn launch() -> io::Result<()> {
     let Some(source_id) = std::env::var("PIP_SOURCE").ok().filter(|id| !id.is_empty()) else {
-        return herdr::open_popup(json!("60%"), json!("50%"), Map::new());
+        return herdr::open_peek(None, json!("60%"), json!("50%"), Map::new());
     };
     let snap = herdr::snapshot()?;
     let source = find_source(&snap.sources, &source_id)?;
     let (width, height) = ratio_size(source, snap.area, DEFAULT_SCALE);
-    let env = Map::from_iter([("PIP_SOURCE".to_string(), Value::from(source_id))]);
-    herdr::open_popup(json!(width), json!(height), env)
+    let env = Map::from_iter([("PIP_SOURCE".to_string(), Value::from(source_id.as_str()))]);
+    herdr::open_peek(Some(&source_id), json!(width), json!(height), env)
 }
 
 fn find_source<'a>(sources: &'a [Source], pane_id: &str) -> io::Result<&'a Source> {
@@ -60,6 +60,8 @@ fn peek() -> io::Result<()> {
         Ok(id) if !id.is_empty() => Some(find_source(&herdr::snapshot()?.sources, &id)?.clone()),
         _ => None,
     };
+    // A float stays open across a jump: herdr hides it while the source is focused.
+    let in_float = std::env::var_os("HERDR_FLOAT_ID").is_some();
     let mut screen = Screen::enter()?;
     let mut notice = None;
     loop {
@@ -93,7 +95,8 @@ fn peek() -> io::Result<()> {
             Action::None => {}
             Action::Close => return Ok(()),
             Action::Jump => match source.as_ref().map(|s| herdr::focus(&s.pane_id)) {
-                Some(Ok(())) => return Ok(()),
+                Some(Ok(())) if !in_float => return Ok(()),
+                Some(Ok(())) => notice = None,
                 Some(Err(err)) => notice = Some(err.to_string()),
                 None => {}
             },
