@@ -1,20 +1,20 @@
 # herdr-pip
 
-A herdr plugin that lets you glance at another pane's live output in a modal
-popup without leaving the current view.
+A herdr plugin that lets you glance at another pane's live output in a floating
+window without leaving the current view.
 
 ## Language
 
 **Peek**:
-One open popup session showing a live, read-only view of a single source pane.
-_Avoid_: PiP window, preview, float
+One open floating window (or a modal popup on herdr without floats) showing a live, read-only view of a single source pane.
+_Avoid_: PiP window, preview
 
 **Source pane**:
 The pane whose output a peek shows.
 _Avoid_: target, observed pane
 
 **Picker**:
-The list of candidate source panes shown in the popup before or between peeks.
+The list of candidate source panes shown in the peek before or between peeks.
 _Avoid_: chooser, selector, menu
 
 **Mirror**:

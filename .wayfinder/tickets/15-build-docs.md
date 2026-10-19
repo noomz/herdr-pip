@@ -3,7 +3,7 @@ title: Build: README, keybind and install docs
 type: task
 status: open
 assignee:
-blocked_by: [11-build-text-mirror.md, 12-build-picker.md, 13-build-resize.md, 14-build-image-mirror.md, 16-pin-split.md]
+blocked_by: [11-build-text-mirror.md, 12-build-picker.md, 13-build-resize.md, 14-build-image-mirror.md]
 ---
 
 ## Question

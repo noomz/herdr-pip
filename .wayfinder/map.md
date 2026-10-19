@@ -5,13 +5,15 @@ label: wayfinder:map
 
 ## Destination
 
-A working, linkable herdr plugin (`herdr-pip`) that opens a **modal popup**
-over the current view showing a **live mirror of one chosen pane**, closable
-with a clickable `[x]` button (and Escape), and can **pin** that mirror into a
-**non-modal split pane** so the user keeps working while it updates. Installed
-with `herdr plugin link` and smoke-tested on herdr 0.9.5.
+A working, linkable herdr plugin (`herdr-pip`) that opens a **non-modal
+float** over the current view showing a **live mirror of one chosen pane**,
+closable with a clickable `[x]` button (and Escape), hidden while its source is
+focused. Installed with `herdr plugin link`; smoke-tested on fork herdr
+(floats), with the stock herdr 0.9.5 modal popup fallback verified.
 (Redrawn 2026-10-16: a modal-only popup blocks all work, see
-[Does a kitty image render correctly inside a popup?](tickets/09-spike-image-mirror.md).)
+[Does a kitty image render correctly inside a popup?](tickets/09-spike-image-mirror.md).
+Redrawn 2026-10-19: floats replace the pinned split, see
+[How should a pinned split mirror behave?](tickets/16-pin-split.md).)
 
 ## Notes
 
@@ -58,18 +60,17 @@ with `herdr plugin link` and smoke-tested on herdr 0.9.5.
 - **Testing approach.** Pure render/crop logic unit tests vs live smoke script.
   Ghostty smoke can run in the `aero-probe` tart VM (Ghostty 1.3.1, herdr,
   standalone Python at `~/python` installed there).
-- **Build: pin to split.** Build ticket for the pinned mirror; graduates once
-  [How should a pinned split mirror behave?](tickets/16-pin-split.md) closes.
 
 ## Out of scope
 
 - Non-modal floating / draggable PiP (typing underneath while it floats; popups are always centered and modal): needs a herdr
   core floating layer; not possible in plugin v1. User wants it (2026-10-16)
-  as the follow-up **fork-core effort** after this map; the pinned split is the
-  plugin-only stand-in. Also there: minimize the peek while its source pane is
+  as the follow-up **fork-core effort** after this map (since built: the peek
+  opens as a fork float, see [Build: plugin skeleton, launcher and socket client](tickets/10-build-skeleton.md)). Also there: minimize the peek while its source pane is
   focused and restore it on leaving (user, 2026-10-16 smoke test; close kills
   the popup session, no hide exists). Written up as a fork issue:
   `~/Projects/Opensources/herdr/.local/prd/floating-popup.md`.
 - Previewing a whole tab as a composite of its panes.
 - Marketplace publishing.
 - Sixel / iTerm2 image mirrors (herdr drops them).
+- [How should a pinned split mirror behave?](tickets/16-pin-split.md): pinned split mirror dropped; fork floats already give a non-modal peek, stock herdr is popup-fallback only, and a tiled mirror would be a new feature.
