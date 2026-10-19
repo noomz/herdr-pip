@@ -1,19 +1,27 @@
 mod herdr;
+mod kitty;
 mod mirror;
 mod picker;
+mod raster;
 mod scale;
 
 use crossterm::event::{self, Event, KeyCode, MouseButton, MouseEventKind};
 use crossterm::terminal;
 use herdr::Source;
+use kitty::Images;
 use mirror::{Mirror, Observer};
 use picker::Picker;
+use raster::Raster;
 use serde_json::{json, Map, Value};
 use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const PAINT_TICK: Duration = Duration::from_millis(33);
+/// The image mirror's frame interval: rasterizing and sending a picture costs far more than a text row.
+const IMAGE_TICK: Duration = Duration::from_millis(100);
+/// How long the kitty graphics probe waits for the terminal's reply.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 /// How often a float peek re-reads its source's size; the source can be resized beside it.
 const SOURCE_CHECK: Duration = Duration::from_secs(2);
 /// Picker size in percent of the pane surface.
@@ -64,7 +72,8 @@ fn ratio_size(source: &Source, area: (u16, u16), scale: u32) -> (u16, u16) {
 }
 
 /// The peek process: top row with source or filter and `[x]`; below it the picker or a
-/// read-only text mirror. `PIP_SOURCE` skips the picker.
+/// read-only mirror, an image mirror when the terminal has kitty graphics, else a text
+/// mirror. `PIP_SOURCE` skips the picker.
 fn peek() -> io::Result<()> {
     // A float stays open across a jump and switches between picker and mirror in place.
     let float_id = std::env::var("HERDR_FLOAT_ID").ok();
@@ -75,6 +84,12 @@ fn peek() -> io::Result<()> {
     };
     let mut screen = Screen::enter()?;
     let mut notice = None;
+    let mut raster = None;
+    if kitty::probe(PROBE_TIMEOUT)? {
+        let (loaded, font_error) = Raster::load();
+        raster = Some(loaded);
+        notice = font_error;
+    }
     let mut source_checked = Instant::now();
     let mut scale = scale::load();
     loop {
@@ -95,9 +110,13 @@ fn peek() -> io::Result<()> {
                     }
                 }
                 screen.paint_top_row(&top_row_text(source, notice.as_deref()))?;
-                screen.paint_mirror(&observer.mirror)?;
+                match &mut raster {
+                    Some(raster) => screen.paint_image(&observer.mirror, raster)?,
+                    None => screen.paint_mirror(&observer.mirror)?,
+                }
             }
             View::Picker(picker) => {
+                screen.clear_image()?;
                 screen.paint_top_row(&picker_top_row_text(&picker.filter, notice.as_deref()))?;
                 let (cols, rows) = terminal::size()?;
                 let body_rows = rows.saturating_sub(1);
@@ -330,6 +349,8 @@ struct Screen {
     drawn_top_row: Option<String>,
     /// Body rows as last drawn from screen row 2 down; `None` forces a full repaint.
     drawn_body: Option<Vec<Vec<u8>>>,
+    images: Images,
+    image_painted: Instant,
 }
 
 impl Screen {
@@ -338,7 +359,33 @@ impl Screen {
         let mut out = io::stdout();
         out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J")?;
         out.flush()?;
-        Ok(Screen { out, drawn_top_row: None, drawn_body: None })
+        Ok(Screen { out, drawn_top_row: None, drawn_body: None, images: Images::default(), image_painted: Instant::now() })
+    }
+
+    /// Re-sends the mirror as one picture letterboxed below the top row: right after an
+    /// invalidate, else at most every `IMAGE_TICK` and only when a frame arrived.
+    fn paint_image(&mut self, mirror: &Mutex<Mirror>, raster: &mut Raster) -> io::Result<()> {
+        let (cols, rows) = terminal::size()?;
+        let body_rows = rows.saturating_sub(1);
+        let mut mirror = mirror.lock().unwrap();
+        let due = mirror.dirty && self.image_painted.elapsed() >= IMAGE_TICK;
+        if (self.drawn_body.is_some() && !due) || cols == 0 || body_rows == 0 {
+            return Ok(());
+        }
+        mirror.dirty = false;
+        let (source_screen, size) = mirror.screen();
+        let picture = raster.render(source_screen, size.0, size.1);
+        drop(mirror);
+        // Blank the text cells under and beside the picture.
+        self.paint_body(Vec::new(), body_rows)?;
+        let (dx, dy, c, r) = kitty::letterbox(size, (cols, body_rows));
+        self.images.place(&mut self.out, &picture, (1 + dx, 2 + dy), (c, r))?;
+        self.image_painted = Instant::now();
+        Ok(())
+    }
+
+    fn clear_image(&mut self) -> io::Result<()> {
+        self.images.clear(&mut self.out)
     }
 
     fn invalidate(&mut self) {
@@ -396,6 +443,7 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        let _ = self.clear_image();
         let _ = self.out.write_all(b"\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l");
         let _ = self.out.flush();
         let _ = terminal::disable_raw_mode();

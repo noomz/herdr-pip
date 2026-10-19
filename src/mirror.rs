@@ -40,6 +40,13 @@ impl Mirror {
         }
     }
 
+    /// The source's screen and its size (columns, rows), without the spare column.
+    pub fn screen(&self) -> (&vt100::Screen, (u16, u16)) {
+        let screen = self.parser.screen();
+        let (rows, grid_cols) = screen.size();
+        (screen, (grid_cols - 1, rows))
+    }
+
     /// The left `cols` columns of the last `rows` rows that end at the source's content
     /// (its last non-blank row or the cursor row, whichever is lower), so a short output
     /// still shows instead of the blank rows below it. Each row is self-contained
