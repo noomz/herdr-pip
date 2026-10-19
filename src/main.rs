@@ -4,6 +4,7 @@ mod mirror;
 mod picker;
 mod raster;
 mod scale;
+mod state;
 
 use crossterm::event::{self, Event, KeyCode, MouseButton, MouseEventKind};
 use crossterm::terminal;
@@ -18,8 +19,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const PAINT_TICK: Duration = Duration::from_millis(33);
-/// The image mirror's frame interval: rasterizing and sending a picture costs far more than a text row.
-const IMAGE_TICK: Duration = Duration::from_millis(100);
+/// The image mirror's frame interval. herdr decodes and re-uploads every picture, so each
+/// frame costs the whole session CPU, not just this process.
+const IMAGE_TICK: Duration = Duration::from_millis(200);
+/// The text mirror's frame interval: herdr redraws the whole float for each repaint.
+const TEXT_TICK: Duration = Duration::from_millis(100);
 /// How long the kitty graphics probe waits for the terminal's reply.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 /// How often a float peek re-reads its source's size; the source can be resized beside it.
@@ -92,6 +96,7 @@ fn peek() -> io::Result<()> {
     }
     let mut source_checked = Instant::now();
     let mut scale = scale::load();
+    let mut mode = MirrorMode::load();
     loop {
         match &mut view {
             View::Mirror { source, observer } => {
@@ -110,9 +115,9 @@ fn peek() -> io::Result<()> {
                     }
                 }
                 screen.paint_top_row(&top_row_text(source, notice.as_deref()))?;
-                match &mut raster {
-                    Some(raster) => screen.paint_image(&observer.mirror, raster)?,
-                    None => screen.paint_mirror(&observer.mirror)?,
+                match (&mut raster, mode) {
+                    (Some(raster), MirrorMode::Image) => screen.paint_image(&observer.mirror, raster)?,
+                    _ => screen.paint_mirror(&observer.mirror)?,
                 }
             }
             View::Picker(picker) => {
@@ -164,6 +169,16 @@ fn peek() -> io::Result<()> {
                 if let Err(err) = herdr::retarget_float(float_id, Some(&source.pane_id), json!(width), json!(height)) {
                     notice = Some(err.to_string());
                 }
+                screen.invalidate();
+            }
+            Action::ToggleMode => {
+                if raster.is_none() {
+                    notice = Some("image mirror needs kitty graphics".to_string());
+                    continue;
+                }
+                mode = mode.toggled();
+                notice = mode.save().err().map(|err| format!("mode not saved: {err}"));
+                screen.clear_image()?;
                 screen.invalidate();
             }
             Action::Pick => {
@@ -223,6 +238,33 @@ enum Action {
     Peek(String),
     /// Resize the mirror and remember the new scale.
     Scale(scale::Change),
+    /// Switch between the image and text mirror and remember the choice.
+    ToggleMode,
+}
+
+/// How the mirror is drawn. Image needs kitty graphics; without them the text mirror shows
+/// whatever the remembered mode says.
+#[derive(Clone, Copy, PartialEq)]
+enum MirrorMode {
+    Image,
+    Text,
+}
+
+impl MirrorMode {
+    fn load() -> Self {
+        match state::read("mode").as_deref().map(str::trim) {
+            Some("text") => MirrorMode::Text,
+            _ => MirrorMode::Image,
+        }
+    }
+
+    fn save(self) -> io::Result<()> {
+        state::write("mode", if self == MirrorMode::Text { "text" } else { "image" })
+    }
+
+    fn toggled(self) -> Self {
+        if self == MirrorMode::Text { MirrorMode::Image } else { MirrorMode::Text }
+    }
 }
 
 fn is_close_click(column: u16, row: u16) -> io::Result<bool> {
@@ -231,7 +273,7 @@ fn is_close_click(column: u16, row: u16) -> io::Result<bool> {
 }
 
 /// Mirror keys: Esc/`q` close, Enter or a click on the mirror jumps, `p`/Tab picks,
-/// `+`/`-` step the scale and `=` resets it.
+/// `+`/`-` step the scale and `=` resets it, `m` switches image and text.
 fn mirror_action(event: &Event) -> io::Result<Action> {
     Ok(match event {
         Event::Key(key) => match key.code {
@@ -241,6 +283,7 @@ fn mirror_action(event: &Event) -> io::Result<Action> {
             KeyCode::Char('+') => Action::Scale(scale::Change::Larger),
             KeyCode::Char('-') => Action::Scale(scale::Change::Smaller),
             KeyCode::Char('=') => Action::Scale(scale::Change::Reset),
+            KeyCode::Char('m') => Action::ToggleMode,
             _ => Action::None,
         },
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
@@ -350,7 +393,7 @@ struct Screen {
     /// Body rows as last drawn from screen row 2 down; `None` forces a full repaint.
     drawn_body: Option<Vec<Vec<u8>>>,
     images: Images,
-    image_painted: Instant,
+    painted: Instant,
 }
 
 impl Screen {
@@ -359,7 +402,7 @@ impl Screen {
         let mut out = io::stdout();
         out.write_all(b"\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J")?;
         out.flush()?;
-        Ok(Screen { out, drawn_top_row: None, drawn_body: None, images: Images::default(), image_painted: Instant::now() })
+        Ok(Screen { out, drawn_top_row: None, drawn_body: None, images: Images::default(), painted: Instant::now() })
     }
 
     /// Re-sends the mirror as one picture letterboxed below the top row: right after an
@@ -368,19 +411,23 @@ impl Screen {
         let (cols, rows) = terminal::size()?;
         let body_rows = rows.saturating_sub(1);
         let mut mirror = mirror.lock().unwrap();
-        let due = mirror.dirty && self.image_painted.elapsed() >= IMAGE_TICK;
+        let due = mirror.dirty && self.painted.elapsed() >= IMAGE_TICK;
         if (self.drawn_body.is_some() && !due) || cols == 0 || body_rows == 0 {
             return Ok(());
         }
         mirror.dirty = false;
         let (source_screen, size) = mirror.screen();
-        let picture = raster.render(source_screen, size.0, size.1);
+        let (dx, dy, c, r) = kitty::letterbox(size, (cols, body_rows));
+        // About one font cell per shown cell: finer detail would be scaled away by the
+        // terminal after herdr has already paid to decode and forward it.
+        let ratio = (f32::from(size.0) / f32::from(c.max(1))).min(f32::from(size.1) / f32::from(r.max(1)));
+        let shrink = (ratio.round() as usize).max(1);
+        let picture = raster.render(source_screen, size.0, size.1).shrink(shrink);
         drop(mirror);
         // Blank the text cells under and beside the picture.
         self.paint_body(Vec::new(), body_rows)?;
-        let (dx, dy, c, r) = kitty::letterbox(size, (cols, body_rows));
         self.images.place(&mut self.out, &picture, (1 + dx, 2 + dy), (c, r))?;
-        self.image_painted = Instant::now();
+        self.painted = Instant::now();
         Ok(())
     }
 
@@ -393,12 +440,15 @@ impl Screen {
         self.drawn_body = None;
     }
 
-    /// Repaints the mirror when a frame arrived since the last paint.
+    /// Repaints the mirror right after an invalidate, else at most every `TEXT_TICK` and
+    /// only when a frame arrived.
     fn paint_mirror(&mut self, mirror: &Mutex<Mirror>) -> io::Result<()> {
         let mut mirror = mirror.lock().unwrap();
-        if !mirror.dirty && self.drawn_body.is_some() {
+        let due = mirror.dirty && self.painted.elapsed() >= TEXT_TICK;
+        if self.drawn_body.is_some() && !due {
             return Ok(());
         }
+        self.painted = Instant::now();
         mirror.dirty = false;
         let (cols, rows) = terminal::size()?;
         let body_rows = rows.saturating_sub(1);

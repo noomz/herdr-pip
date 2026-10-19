@@ -78,6 +78,7 @@ source and status, and a clickable `[x]`.
 | `p` or Tab | back to the picker |
 | `+` / `-` | make the peek larger / smaller |
 | `=` | reset the size |
+| `m` | switch between image and text mirror |
 | Esc, `q`, or click `[x]` | close |
 
 The mirror is read-only: other keys do nothing, and nothing is sent to the
@@ -102,14 +103,26 @@ next peek, and the top row shows `resize needs floats`. The picker is always
 
 ## Image mirror and text mirror
 
-herdr-pip draws the mirror in one of two ways. It checks when the peek starts.
+herdr-pip draws the mirror in one of two ways.
 
-- **Image mirror**, when your terminal supports the kitty graphics protocol
-  (for example kitty or Ghostty) and herdr passes kitty images through (the
-  default). The whole source screen is drawn as a scaled-down picture, up to 10
-  times per second and only when it changes.
-- **Text mirror**, otherwise. The mirror shows real text: the source's last
-  rows and left columns, as many as fit.
+- **Image mirror**: the whole source screen as a scaled-down picture, up to 5
+  times per second and only when it changes. It needs a terminal with the kitty
+  graphics protocol (for example kitty or Ghostty), and herdr passing kitty
+  images through (the default). herdr-pip checks this when the peek starts.
+- **Text mirror**: real text, the source's last rows and left columns, as many
+  as fit, up to 10 times per second. It is used when the terminal has no kitty
+  graphics.
+
+Press `m` in the mirror to switch. The choice is saved in
+`$XDG_STATE_HOME/herdr-pip/mode` and applies to every later peek. Without kitty
+graphics, `m` shows `image mirror needs kitty graphics`.
+
+An open peek costs CPU in herdr and in your terminal, not only in herdr-pip:
+herdr streams the source to the peek, and decodes and re-sends every picture.
+With a busy source, the text mirror is the cheaper choice. Measured on a
+157×105 source printing 20 lines per second (total CPU of herdr, the terminal
+and herdr-pip): no peek 9%, text mirror 42%, image mirror 85%. With an idle
+source, both cost close to nothing.
 
 The image mirror uses fixed dark colours, because the peek cannot read your
 herdr theme. With a light theme, the picture is still dark.
@@ -134,7 +147,7 @@ error in the top row.
 |---|---|
 | `PIP_FONT` | Font file (TTF/OTF) for the image mirror. |
 | `PIP_SOURCE` | Pane id, for example `w1:p3`. `herdr-pip launch` with this set skips the picker. |
-| `XDG_STATE_HOME` | Where the scale file is saved. |
+| `XDG_STATE_HOME` | Where the scale and mode files are saved. |
 
 To open a peek on a known pane from a script inside herdr:
 

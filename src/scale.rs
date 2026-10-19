@@ -1,8 +1,8 @@
 //! Mirror scale in percent of the source size: one global value, remembered across peeks
 //! in `$XDG_STATE_HOME/herdr-pip/scale`.
 
+use crate::state;
 use std::io;
-use std::path::PathBuf;
 
 pub const DEFAULT: u32 = 50;
 const MIN: u32 = 20;
@@ -26,29 +26,15 @@ pub fn apply(scale: u32, change: Change) -> u32 {
 
 /// The remembered scale, or the default when none is stored or it does not parse.
 pub fn load() -> u32 {
-    state_file()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map_or(DEFAULT, |text| parse(&text))
+    state::read("scale").map_or(DEFAULT, |text| parse(&text))
 }
 
 pub fn save(scale: u32) -> io::Result<()> {
-    let path = state_file().ok_or_else(|| io::Error::other("no XDG_STATE_HOME or HOME"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, format!("{scale}\n"))
+    state::write("scale", &scale.to_string())
 }
 
 fn parse(text: &str) -> u32 {
     text.trim().parse().map_or(DEFAULT, |scale: u32| scale.clamp(MIN, MAX))
-}
-
-fn state_file() -> Option<PathBuf> {
-    let state_home = std::env::var_os("XDG_STATE_HOME")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
-    Some(state_home.join("herdr-pip/scale"))
 }
 
 #[cfg(test)]

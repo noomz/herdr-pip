@@ -17,6 +17,29 @@ pub struct Picture {
     pub rgb: Vec<u8>,
 }
 
+impl Picture {
+    /// Averages each `k`×`k` block into one pixel, dropping a ragged right or bottom edge.
+    pub fn shrink(self, k: usize) -> Picture {
+        if k <= 1 {
+            return self;
+        }
+        let (width, height) = (self.width as usize / k, self.height as usize / k);
+        let mut rgb = vec![0; width * height * 3];
+        for y in 0..height {
+            for x in 0..width {
+                for channel in 0..3 {
+                    let sum: u32 = (0..k)
+                        .flat_map(|dy| (0..k).map(move |dx| ((y * k + dy) * self.width as usize + x * k + dx) * 3 + channel))
+                        .map(|at| u32::from(self.rgb[at]))
+                        .sum();
+                    rgb[(y * width + x) * 3 + channel] = (sum / (k * k) as u32) as u8;
+                }
+            }
+        }
+        Picture { width: width as u32, height: height as u32, rgb }
+    }
+}
+
 /// A glyph's coverage bitmap, placed relative to its cell's top-left corner.
 struct Glyph {
     left: i32,
@@ -208,6 +231,14 @@ mod tests {
         let mut parser = vt100::Parser::new(rows, cols, 0);
         parser.process(ansi.as_bytes());
         parser
+    }
+
+    #[test]
+    fn shrink_averages_blocks_and_drops_the_ragged_edge() {
+        let rgb = [0, 0, 0, 200, 200, 200, 9, 9, 9, 100, 100, 100, 0, 0, 0, 9, 9, 9].to_vec();
+        let shrunk = Picture { width: 3, height: 2, rgb }.shrink(2);
+        assert_eq!((shrunk.width, shrunk.height), (1, 1));
+        assert_eq!(shrunk.rgb, [75, 75, 75]);
     }
 
     fn pixel(raster: &Raster, picture: &Picture, col: usize, row: usize, dx: usize, dy: usize) -> [u8; 3] {
