@@ -1,6 +1,7 @@
 ---
 title: Picture-in-picture pane peek for herdr
 label: wayfinder:map
+status: closed
 ---
 
 ## Destination
@@ -35,6 +36,7 @@ Redrawn 2026-10-19: floats replace the pinned split, see
 - Standing preference: fast, least CPU (a live mirror redraws continuously).
 - No upstream contribution: never open herdr issues or PRs from this effort.
 - Skills for grilling tickets: `grilling` + `domain-modeling`.
+- Testing (settled 2026-10-19, no ticket needed): `cargo test` unit tests for pure render, raster, picker, scale and kitty logic; live smoke in the `mac_jr` tart VM (fork herdr + Ghostty, stock herdr 0.9.5 as `~/.local/bin/herdr.bak-0.9.5` under `XDG_CONFIG_HOME=~/stockcfg`), with `screencapture` proof for anything drawn.
 
 ## Decisions so far
 
@@ -54,12 +56,11 @@ Redrawn 2026-10-19: floats replace the pinned split, see
 - [Build: picker](tickets/12-build-picker.md): attention-first list (blocked, done, working, idle, shell; then newest state change), focused and own pane excluded; type-to-filter, `j`/`k`/`q` only on an empty filter, Esc clears then closes; a float switches picker ↔ mirror in place via `float.set_hide_rule` + `float.resize` (no reopen); source closed → picker with notice.
 - [Build: reopen helper, resize keys and remembered scale](tickets/13-build-resize.md): float-only, no reopen helper; `+`/`-` step a global scale by 10 in 20–100, `=` resets to 50 and refits; float resizes in place; popup fallback saves the scale for the next peek and says `resize needs floats`; scale in `$XDG_STATE_HOME/herdr-pip/scale`, applied to the text mirror too.
 - [Build: image mirror](tickets/14-build-image-mirror.md): kitty `a=q`+DA1 probe else text mirror; bundled JetBrains Mono (`PIP_FONT` override, box for missing glyphs) at 8×18 px cells, fixed dark palette; zlib chunks, ids 7/8 place-then-delete; letterboxed in cells, ≤10 fps, only on change; ≈1% CPU at 4 lines/s.
+- [Build: README, keybind and install docs](tickets/15-build-docs.md): `README.md` covers install, `prefix+shift+p` keybind, keys, size, image vs text mirror, `PIP_FONT`/`PIP_SOURCE`; final smoke on stock herdr 0.9.5 passes (README keybind → modal popup, image mirror, `resize needs floats`, jump, Esc).
 
 ## Not yet specified
 
-- **Testing approach.** Pure render/crop logic unit tests vs live smoke script.
-  Ghostty smoke can run in the `aero-probe` tart VM (Ghostty 1.3.1, herdr,
-  standalone Python at `~/python` installed there).
+_None. Destination reached 2026-10-19; map closed._
 
 ## Out of scope
 
