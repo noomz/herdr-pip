@@ -19,7 +19,7 @@ Terms used below (peek, source pane, picker, mirror) are defined in
 Requires herdr 0.9.5 or later on macOS or Linux, and a Rust toolchain.
 
 ```sh
-git clone <this repo> herdr-pip
+git clone https://github.com/noomz/herdr-pip
 cd herdr-pip
 cargo build --release
 herdr plugin link .
